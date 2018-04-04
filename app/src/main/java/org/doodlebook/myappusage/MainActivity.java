@@ -33,12 +33,12 @@ public class MainActivity extends AppCompatActivity {
         btnStop.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
-                stopService();
+//                stopService();
             }
         });
     }
 
-    private boolean hasPermission() {
+    private boolean hasUsageStatsAccessPermission() {
         AppOpsManager appOps = (AppOpsManager) getSystemService(Context.APP_OPS_SERVICE);
         int mode = appOps.checkOpNoThrow(AppOpsManager.OPSTR_GET_USAGE_STATS, android.os.Process.myUid(), getPackageName());
         return mode == AppOpsManager.MODE_ALLOWED;
@@ -47,7 +47,7 @@ public class MainActivity extends AppCompatActivity {
     private static final int MY_PERMISSIONS_REQUEST_PACKAGE_USAGE_STATS = 100;
 
     private void startService() {
-        if (hasPermission()) {
+        if (hasUsageStatsAccessPermission()) {
             myIntent = new Intent(MainActivity.this, MyService.class);
             startService(myIntent);
         } else {
