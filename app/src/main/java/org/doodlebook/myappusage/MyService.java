@@ -6,6 +6,10 @@ import android.app.usage.UsageStatsManager;
 import android.content.BroadcastReceiver;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.hardware.Sensor;
+import android.hardware.SensorEvent;
+import android.hardware.SensorEventListener;
+import android.hardware.SensorManager;
 import android.net.ConnectivityManager;
 import android.net.NetworkInfo;
 import android.net.wifi.ScanResult;
@@ -17,7 +21,10 @@ import android.content.Context;
 import android.util.Log;
 import android.widget.Toast;
 
+import java.io.FileOutputStream;
 import java.io.IOException;
+import java.util.Date;
+import java.util.HashMap;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 
@@ -34,6 +41,16 @@ public class MyService extends Service {
     MyServiceReceiver myServiceReceiver;
     OkHttpClient client;
 
+    SensorManager sensorManager;
+    Sensor sensorAccelerometer, sensorMagnetic, sensorGyro;
+
+    HashMap<Integer, Long> sensorPrevmillis = new HashMap<Integer, Long>();
+    HashMap<Integer, String> sensorTypeName = new HashMap<Integer, String>();
+//    static boolean isSensorRegistered;
+    StringBuilder dataSensor;
+    long listenCount = 0;
+
+
     @Nullable
     @Override
     public IBinder onBind(Intent intent) {
@@ -44,12 +61,25 @@ public class MyService extends Service {
     public void onCreate() {
         myServiceReceiver = new MyServiceReceiver();
         client = new OkHttpClient();
+        setupSensors();
         super.onCreate();
+    }
+
+    private void setupSensors() {
+        sensorManager = (SensorManager) getSystemService(Context.SENSOR_SERVICE);
+        sensorAccelerometer = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER);
+        sensorMagnetic = sensorManager.getDefaultSensor(Sensor.TYPE_MAGNETIC_FIELD);
+        sensorGyro = sensorManager.getDefaultSensor(Sensor.TYPE_GYROSCOPE);
+
+        dataSensor = new StringBuilder();
+        sensorTypeName.put(Sensor.TYPE_ACCELEROMETER, "ACC");
+        sensorTypeName.put(Sensor.TYPE_GYROSCOPE, "GYRO");
+        sensorTypeName.put(Sensor.TYPE_MAGNETIC_FIELD, "MAGNET");
     }
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
-        Toast.makeText(getApplicationContext(), "MyService: onStartCommand", Toast.LENGTH_LONG).show();
+//        Toast.makeText(getApplicationContext(), "MyService: onStartCommand", Toast.LENGTH_LONG).show();
 
         IntentFilter intentFilter = new IntentFilter();
         intentFilter.addAction(Intent.ACTION_USER_PRESENT);
@@ -80,56 +110,57 @@ public class MyService extends Service {
                 screenState = "off";
             } else if (action.equals(Intent.ACTION_USER_PRESENT)) {
                 screenState = "on";
+                registerSensor();
             }
             String usageData = getAppUsageStats(screenState);
             String data = Build.MODEL + " " + Build.VERSION.RELEASE
                     + "," + screenState + "," + usageData;
 //            Toast.makeText(getApplicationContext(), data, Toast.LENGTH_LONG).show();
 
-            if (canAccessWebServer() && isMyWebServerAvailable())
-                postDataToServer(data);
-            else {
-//                saveDataLocally(data);  // do this later
-//                Toast.makeText(getApplicationContext(), "HomeWifi not available", Toast.LENGTH_LONG).show();
-            }
+            postDataToServer("app_usage", data);
         }
     }
 
-    private boolean isMyWebServerAvailable() {
-        Runtime runtime = Runtime.getRuntime();
-        try {
-            Process ipProcess = runtime.exec("/system/bin/ping -c 1 192.168.1.99");
-            int     exitValue = ipProcess.waitFor();
-            return (exitValue == 0);
-        } catch (IOException | InterruptedException e) { e.printStackTrace(); }
-        return false;
+    private void registerSensor() {
+        sensorManager.registerListener(sensorEventListener, sensorAccelerometer, SensorManager.SENSOR_DELAY_NORMAL);
+        sensorManager.registerListener(sensorEventListener, sensorMagnetic, SensorManager.SENSOR_DELAY_NORMAL);
+
+        long prev_millis = System.currentTimeMillis();
+        sensorPrevmillis.put(Sensor.TYPE_ACCELEROMETER, prev_millis);
+        sensorPrevmillis.put(Sensor.TYPE_GYROSCOPE, prev_millis);
+        sensorPrevmillis.put(Sensor.TYPE_MAGNETIC_FIELD, prev_millis);
+
+        listenCount = 0;
     }
 
-    private boolean canAccessWebServer() {
-        ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
-        NetworkInfo activeNetwork = cm.getActiveNetworkInfo();
-        return activeNetwork != null &&
-                activeNetwork.isConnectedOrConnecting() &&
-                activeNetwork.getType() == ConnectivityManager.TYPE_WIFI;
-    }
+    public SensorEventListener sensorEventListener = new SensorEventListener() {
+        public void onAccuracyChanged(Sensor sensor, int accuracy) {}
 
-    private final String HOME_BSSID = "48:5d:36:25:e1:5a"; // FiOS-SCGDC
-    private boolean isHomeWifiAvailable() {
-        WifiManager wifi = (WifiManager) getApplicationContext().getSystemService(Context.WIFI_SERVICE);
-        wifi.startScan();
-        List<ScanResult> wifiScanList = wifi.getScanResults();
+        public void onSensorChanged(SensorEvent event) {
+            int sensorType = event.sensor.getType();  // 1: accelerator, 2: magnetic, 4: gyroscope, ??: light
+            long curr_millis = System.currentTimeMillis();
+            if (curr_millis - sensorPrevmillis.get(sensorType) < 2000) // 10 seconds
+                return;
+            sensorPrevmillis.put(sensorType, curr_millis);
 
-        for (ScanResult scanResult : wifiScanList) {
-            String ssid = scanResult.SSID;
-            String bssid = scanResult.BSSID;
-//            Log.d("SSID", ssid + "   " + bssid);
-            if (bssid.equals(HOME_BSSID)) {
-                Log.d("FOUND", ssid + "   " + bssid);
-                return true;
+            float[] xyz = event.values;
+            String record = Build.MODEL + " " + Build.VERSION.RELEASE
+                    + "," + curr_millis
+                    + "," + sensorType + "," + sensorTypeName.get(sensorType)
+                    + "," + xyz[0] + "," + xyz[1] + "," + xyz[2] + "\n";
+
+//            Log.d("info", listenCount + "   \n" + record);
+            dataSensor.append(record);
+            listenCount ++;
+            if (listenCount % 5 == 0) {
+                postDataToServer("posture_xyz", dataSensor.toString());
+                dataSensor.setLength(0);
+
+                sensorManager.unregisterListener(sensorEventListener);
             }
         }
-        return false;
-    }
+    };
+
 
 
     private String getAppUsageStats(String screenState) {
@@ -149,24 +180,37 @@ public class MyService extends Service {
         StringBuilder lStringBuilder = new StringBuilder();
 
         for (UsageStats lUsageStats:lUsageStatsList) {
+            int totalTimeInForeground = (int) lUsageStats.getTotalTimeInForeground() / 1000;
+            if (totalTimeInForeground<1) {
+                continue;
+            }
             lStringBuilder.append(lUsageStats.getPackageName());
             lStringBuilder.append("|");
             lStringBuilder.append(lUsageStats.getLastTimeUsed());
             lStringBuilder.append("|");
-            lStringBuilder.append(lUsageStats.getTotalTimeInForeground() / 1000);
+            lStringBuilder.append(totalTimeInForeground);
             lStringBuilder.append(";");
         }
         return lStringBuilder.toString();
     }
 
-    private void postDataToServer(String data) {
+    private void postDataToServer(String task, String data) {
+        if (canAccessWebServer() && isMyWebServerAvailable())
+            doPostDataToServer(task, data);
+        else { // I should save data here for debug: what happens when no data received on my server
+//                Toast.makeText(getApplicationContext(), "HomeWifi not available", Toast.LENGTH_LONG).show();
+//                saveDataLocally(data);  // do this later
+        }
+    }
+
+    private void doPostDataToServer(String task, String data) {
         OkHttpClient client;
         client = new OkHttpClient();
 
 //        String url = "http://192.168.1.99:5000";  // GET method
         String url = "http://192.168.1.99:5000/api"; // POST method
         RequestBody body = new FormBody.Builder()
-                .add("type", "app_usage")
+                .add("type", task)
                 .add("data", data)
                 .build();
 
@@ -189,5 +233,44 @@ public class MyService extends Service {
         });
 
     }
+
+    private boolean isMyWebServerAvailable() {
+        Runtime runtime = Runtime.getRuntime();
+        try {
+            Process ipProcess = runtime.exec("/system/bin/ping -c 1 192.168.1.99");
+            int     exitValue = ipProcess.waitFor();
+            return (exitValue == 0);
+        } catch (IOException | InterruptedException e) { e.printStackTrace(); }
+        return false;
+    }
+
+    private boolean canAccessWebServer() {
+        ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
+        NetworkInfo activeNetwork = cm.getActiveNetworkInfo();
+        return activeNetwork != null &&
+                activeNetwork.isConnectedOrConnecting() &&
+                activeNetwork.getType() == ConnectivityManager.TYPE_WIFI;
+    }
+
+/*
+    private final String HOME_BSSID = "48:5d:36:25:e1:5a"; // FiOS-SCGDC
+    private boolean isHomeWifiAvailable() {
+        WifiManager wifi = (WifiManager) getApplicationContext().getSystemService(Context.WIFI_SERVICE);
+        wifi.startScan();
+        List<ScanResult> wifiScanList = wifi.getScanResults();
+
+        for (ScanResult scanResult : wifiScanList) {
+            String ssid = scanResult.SSID;
+            String bssid = scanResult.BSSID;
+//            Log.d("SSID", ssid + "   " + bssid);
+            if (bssid.equals(HOME_BSSID)) {
+                Log.d("FOUND", ssid + "   " + bssid);
+                return true;
+            }
+        }
+        return false;
+    }
+*/
+
 
 }
