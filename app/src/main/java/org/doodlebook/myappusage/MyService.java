@@ -39,16 +39,15 @@ import okhttp3.Response;
 public class MyService extends Service {
 
     MyServiceReceiver myServiceReceiver;
-    OkHttpClient client;
+//    OkHttpClient client;
 
     SensorManager sensorManager;
     Sensor sensorAccelerometer, sensorMagnetic, sensorGyro;
 
     HashMap<Integer, Long> sensorPrevmillis = new HashMap<Integer, Long>();
     HashMap<Integer, String> sensorTypeName = new HashMap<Integer, String>();
-//    static boolean isSensorRegistered;
     StringBuilder dataSensor;
-    long listenCount = 0;
+    long listenCount;
 
 
     @Nullable
@@ -59,34 +58,22 @@ public class MyService extends Service {
 
     @Override
     public void onCreate() {
-        myServiceReceiver = new MyServiceReceiver();
-        client = new OkHttpClient();
-        setupSensors();
         super.onCreate();
-    }
-
-    private void setupSensors() {
-        sensorManager = (SensorManager) getSystemService(Context.SENSOR_SERVICE);
-        sensorAccelerometer = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER);
-        sensorMagnetic = sensorManager.getDefaultSensor(Sensor.TYPE_MAGNETIC_FIELD);
-        sensorGyro = sensorManager.getDefaultSensor(Sensor.TYPE_GYROSCOPE);
-
-        dataSensor = new StringBuilder();
-        sensorTypeName.put(Sensor.TYPE_ACCELEROMETER, "ACC");
-        sensorTypeName.put(Sensor.TYPE_GYROSCOPE, "GYRO");
-        sensorTypeName.put(Sensor.TYPE_MAGNETIC_FIELD, "MAGNET");
     }
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
 //        Toast.makeText(getApplicationContext(), "MyService: onStartCommand", Toast.LENGTH_LONG).show();
 
+        myServiceReceiver = new MyServiceReceiver();
+
+        setupSensors();
+
         IntentFilter intentFilter = new IntentFilter();
         intentFilter.addAction(Intent.ACTION_USER_PRESENT);
         intentFilter.addAction(Intent.ACTION_SCREEN_OFF);
+        intentFilter.addAction(Intent.ACTION_SCREEN_ON);
         registerReceiver(myServiceReceiver, intentFilter);
-
-//        postDataToServer("debug: start service");
 
         return super.onStartCommand(intent, flags, startId);
     }
@@ -108,14 +95,17 @@ public class MyService extends Service {
             String screenState = "";
             if (action.equals(Intent.ACTION_SCREEN_OFF)) {
                 screenState = "off";
+                sensorManager.unregisterListener(sensorEventListener);
             } else if (action.equals(Intent.ACTION_USER_PRESENT)) {
                 screenState = "on";
+                registerSensor();
+            } else if (action.equals(Intent.ACTION_SCREEN_ON)) {
+                screenState = "onn";
                 registerSensor();
             }
             String usageData = getAppUsageStats(screenState);
             String data = Build.MODEL + " " + Build.VERSION.RELEASE
                     + "," + screenState + "," + usageData;
-//            Toast.makeText(getApplicationContext(), data, Toast.LENGTH_LONG).show();
 
             postDataToServer("app_usage", data);
         }
@@ -124,13 +114,27 @@ public class MyService extends Service {
     private void registerSensor() {
         sensorManager.registerListener(sensorEventListener, sensorAccelerometer, SensorManager.SENSOR_DELAY_NORMAL);
         sensorManager.registerListener(sensorEventListener, sensorMagnetic, SensorManager.SENSOR_DELAY_NORMAL);
+        sensorManager.registerListener(sensorEventListener, sensorGyro, SensorManager.SENSOR_DELAY_NORMAL);
 
         long prev_millis = System.currentTimeMillis();
         sensorPrevmillis.put(Sensor.TYPE_ACCELEROMETER, prev_millis);
-        sensorPrevmillis.put(Sensor.TYPE_GYROSCOPE, prev_millis);
         sensorPrevmillis.put(Sensor.TYPE_MAGNETIC_FIELD, prev_millis);
+        sensorPrevmillis.put(Sensor.TYPE_GYROSCOPE, prev_millis);
 
         listenCount = 0;
+        dataSensor = new StringBuilder();
+    }
+
+    private void setupSensors() {
+        sensorManager = (SensorManager) getSystemService(Context.SENSOR_SERVICE);
+
+        sensorAccelerometer = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER);
+        sensorMagnetic = sensorManager.getDefaultSensor(Sensor.TYPE_MAGNETIC_FIELD);
+        sensorGyro = sensorManager.getDefaultSensor(Sensor.TYPE_GYROSCOPE);
+
+        sensorTypeName.put(Sensor.TYPE_ACCELEROMETER, "ACC");
+        sensorTypeName.put(Sensor.TYPE_MAGNETIC_FIELD, "MAG");
+        sensorTypeName.put(Sensor.TYPE_GYROSCOPE, "GYR");
     }
 
     public SensorEventListener sensorEventListener = new SensorEventListener() {
@@ -139,24 +143,32 @@ public class MyService extends Service {
         public void onSensorChanged(SensorEvent event) {
             int sensorType = event.sensor.getType();  // 1: accelerator, 2: magnetic, 4: gyroscope, ??: light
             long curr_millis = System.currentTimeMillis();
-            if (curr_millis - sensorPrevmillis.get(sensorType) < 2000) // 10 seconds
+            if (curr_millis - sensorPrevmillis.get(sensorType) < 3000) // 1000 = 1 second
                 return;
             sensorPrevmillis.put(sensorType, curr_millis);
 
             float[] xyz = event.values;
-            String record = Build.MODEL + " " + Build.VERSION.RELEASE
-                    + "," + curr_millis
-                    + "," + sensorType + "," + sensorTypeName.get(sensorType)
-                    + "," + xyz[0] + "," + xyz[1] + "," + xyz[2] + "\n";
 
-//            Log.d("info", listenCount + "   \n" + record);
+            String record = sensorTypeName.get(sensorType);
+            for (int i=0; i<3; i++)
+                record += "|" + String.format("%.2f", xyz[i]);
+            record += ";";
+
+            Log.d("info", listenCount + "   \n" + record + "\n");
             dataSensor.append(record);
-            listenCount ++;
-            if (listenCount % 5 == 0) {
-                postDataToServer("posture_xyz", dataSensor.toString());
-                dataSensor.setLength(0);
 
-                sensorManager.unregisterListener(sensorEventListener);
+            if (sensorType == Sensor.TYPE_MAGNETIC_FIELD) {
+                listenCount++;
+                if (listenCount%10 == 0) {
+                    dataSensor.append("," + Build.MODEL + " " + Build.VERSION.RELEASE + "," + System.currentTimeMillis());
+                    if (listenCount==5 || listenCount==10 || listenCount==20) {
+                        postDataToServer("posture_xyz", dataSensor.toString());
+                        if (listenCount==20) {
+                            sensorManager.unregisterListener(sensorEventListener);
+                        }
+                    }
+                    dataSensor.setLength(0);
+                }
             }
         }
     };
